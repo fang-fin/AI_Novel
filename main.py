@@ -11,30 +11,121 @@ from datetime import datetime
 from io import BytesIO
 from flask import Flask, render_template_string, request, jsonify, send_file
 from markdown import markdown
+from dotenv import load_dotenv
 # NOTE: This application requires the 'python-docx' and 'beautifulsoup4' libraries.
-# Install with: pip install python-docx beautifulsoup4
+# Install with: pip install python-docx beautifulsoup4 python-dotenv
 from docx import Document
 from bs4 import BeautifulSoup
 
-# --- LLM API Configuration ---
-# 请根据你的环境配置这些设置
-<<<<<<< Updated upstream
-VLLM_SERVER_HOST = ""
-VLLM_SERVER_PORT = ""
-OPENAI_API_ENDPOINT_PATH = "/v1/chat/completions"
-TARGET_API_URL = f"http://{VLLM_SERVER_HOST}:{VLLM_SERVER_PORT}{OPENAI_API_ENDPOINT_PATH}"
-SERVED_MODEL_IDENTIFIER = ''
-=======
-VLLM_SERVER_HOST = "ip"
-VLLM_SERVER_PORT = "port"
-OPENAI_API_ENDPOINT_PATH = "/v1/chat/completions"
-TARGET_API_URL = f"http://{VLLM_SERVER_HOST}:{VLLM_SERVER_PORT}{OPENAI_API_ENDPOINT_PATH}"
-SERVED_MODEL_IDENTIFIER = 'models'
->>>>>>> Stashed changes
-API_HEADERS = {
-    "Content-Type": "application/json",
-    # "Authorization": "Bearer YOUR_API_KEY" # 如果需要，请添加你的API密钥
-}
+# --- Load Configuration from .env ---
+load_dotenv()
+
+# LLM Provider: openai, anthropic, grok, custom
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "custom").lower()
+
+# OpenAI Configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+# Anthropic Configuration
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+
+# Grok (xAI) Configuration
+GROK_API_KEY = os.getenv("GROK_API_KEY", "")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4-fast-non-reasoning")
+
+# DeepSeek Configuration
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+# Custom / Self-hosted LLM Configuration
+CUSTOM_API_BASE = os.getenv("CUSTOM_API_BASE", "http://localhost:8000/v1")
+CUSTOM_API_KEY = os.getenv("CUSTOM_API_KEY", "")
+CUSTOM_MODEL = os.getenv("CUSTOM_MODEL", "")
+
+# Generation Settings
+DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.75"))
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "600"))
+
+# Proxy Configuration
+HTTP_PROXY = os.getenv("HTTP_PROXY", "")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY", "")
+
+# Setup proxy for requests
+PROXIES = None
+if HTTP_PROXY or HTTPS_PROXY:
+    PROXIES = {}
+    if HTTP_PROXY:
+        PROXIES["http"] = HTTP_PROXY
+    if HTTPS_PROXY:
+        PROXIES["https"] = HTTPS_PROXY
+    # Also set environment variables for libraries that use them
+    os.environ["http_proxy"] = HTTP_PROXY if HTTP_PROXY else ""
+    os.environ["https_proxy"] = HTTPS_PROXY if HTTPS_PROXY else ""
+
+# --- Build API URL and Headers based on provider ---
+def get_api_config():
+    """Get API configuration based on the selected provider."""
+    if LLM_PROVIDER == "openai":
+        return {
+            "api_url": f"{OPENAI_API_BASE}/chat/completions",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}"
+            },
+            "model": OPENAI_MODEL,
+            "provider": "openai"
+        }
+    elif LLM_PROVIDER == "anthropic":
+        return {
+            "api_url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01"
+            },
+            "model": ANTHROPIC_MODEL,
+            "provider": "anthropic"
+        }
+    elif LLM_PROVIDER == "grok":
+        return {
+            "api_url": "https://api.x.ai/v1/chat/completions",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROK_API_KEY}"
+            },
+            "model": GROK_MODEL,
+            "provider": "grok"
+        }
+    elif LLM_PROVIDER == "deepseek":
+        return {
+            "api_url": "https://api.deepseek.com/v1/chat/completions",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+            },
+            "model": DEEPSEEK_MODEL,
+            "provider": "deepseek"
+        }
+    else:  # custom (vLLM, Ollama, LM Studio, etc.)
+        headers = {"Content-Type": "application/json"}
+        if CUSTOM_API_KEY:
+            headers["Authorization"] = f"Bearer {CUSTOM_API_KEY}"
+        return {
+            "api_url": f"{CUSTOM_API_BASE}/chat/completions",
+            "headers": headers,
+            "model": CUSTOM_MODEL,
+            "provider": "custom"
+        }
+
+# Initialize API config
+API_CONFIG = get_api_config()
+TARGET_API_URL = API_CONFIG["api_url"]
+SERVED_MODEL_IDENTIFIER = API_CONFIG["model"]
+API_HEADERS = API_CONFIG["headers"]
 
 # --- 所有生成作品的基础目录 ---
 WORKS_LIBRARY_PATH = "works_library"
@@ -289,32 +380,93 @@ class TokenTracker:
 
 class ContentGenerator:
     """Handles all interactions with the LLM API."""
-    def __init__(self, api_url, api_headers, model_id, tracker):
+    def __init__(self, api_url, api_headers, model_id, tracker, provider="custom"):
         self.api_url = api_url
         self.api_headers = api_headers
         self.model_id = model_id
         self.tracker = tracker
+        self.provider = provider
 
-    def _call_llm(self, prompt, max_tokens=8192, temperature=0.75, task_id=None):
-        log_message(f"  > Calling LLM API...", task_id)
-        payload = { "model": self.model_id, "messages": [{"role": "system", "content": "You are a creative and intelligent assistant."}, {"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": temperature }
+    def _call_llm(self, prompt, max_tokens=None, temperature=None, task_id=None):
+        # Use defaults from environment if not specified
+        if max_tokens is None:
+            max_tokens = DEFAULT_MAX_TOKENS
+        if temperature is None:
+            temperature = DEFAULT_TEMPERATURE
+            
+        log_message(f"  > Calling LLM API ({self.provider})...", task_id)
+        
         try:
-            response = requests.post(self.api_url, headers=self.api_headers, data=json.dumps(payload), timeout=600)
-            response.raise_for_status()
-            data = response.json()
-            content = data['choices'][0]['message']['content']
-            
-            # Track token usage
-            usage = data.get('usage', {})
-            prompt_tokens = usage.get('prompt_tokens', 0)
-            completion_tokens = usage.get('completion_tokens', 0)
-            if self.tracker and (prompt_tokens > 0 or completion_tokens > 0):
-                self.tracker.update(prompt_tokens, completion_tokens)
-            
-            log_message(f"  > LLM response received. Tokens used: P={prompt_tokens}, C={completion_tokens}", task_id)
-            return content
+            if self.provider == "anthropic":
+                # Anthropic API format
+                payload = {
+                    "model": self.model_id,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ]
+                }
+                response = requests.post(
+                    self.api_url, 
+                    headers=self.api_headers, 
+                    data=json.dumps(payload), 
+                    timeout=DEFAULT_TIMEOUT,
+                    proxies=PROXIES
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data['content'][0]['text']
+                
+                # Track token usage (Anthropic uses usage object)
+                usage = data.get('usage', {})
+                prompt_tokens = usage.get('input_tokens', 0)
+                completion_tokens = usage.get('output_tokens', 0)
+                if self.tracker and (prompt_tokens > 0 or completion_tokens > 0):
+                    self.tracker.update(prompt_tokens, completion_tokens)
+                
+                log_message(f"  > LLM response received. Tokens used: P={prompt_tokens}, C={completion_tokens}", task_id)
+                return content
+            else:
+                # OpenAI / Custom API format (OpenAI-compatible)
+                payload = {
+                    "model": self.model_id, 
+                    "messages": [
+                        {"role": "system", "content": "You are a creative and intelligent assistant."}, 
+                        {"role": "user", "content": prompt}
+                    ], 
+                    "max_tokens": max_tokens, 
+                    "temperature": temperature
+                }
+                response = requests.post(
+                    self.api_url, 
+                    headers=self.api_headers, 
+                    data=json.dumps(payload), 
+                    timeout=DEFAULT_TIMEOUT,
+                    proxies=PROXIES
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data['choices'][0]['message']['content']
+                
+                # Track token usage
+                usage = data.get('usage', {})
+                prompt_tokens = usage.get('prompt_tokens', 0)
+                completion_tokens = usage.get('completion_tokens', 0)
+                if self.tracker and (prompt_tokens > 0 or completion_tokens > 0):
+                    self.tracker.update(prompt_tokens, completion_tokens)
+                
+                log_message(f"  > LLM response received. Tokens used: P={prompt_tokens}, C={completion_tokens}", task_id)
+                return content
         except requests.exceptions.RequestException as e:
             log_message(f"  [ERROR] API request failed: {e}", task_id)
+            # Log response details for debugging
+            try:
+                if hasattr(e, 'response') and e.response is not None:
+                    log_message(f"  [ERROR] Response status: {e.response.status_code}", task_id)
+                    log_message(f"  [ERROR] Response body: {e.response.text[:500]}", task_id)
+            except:
+                pass
             return f"API_REQUEST_ERROR: {e}"
         except (KeyError, IndexError) as e:
             log_message(f"  [ERROR] Failed to parse API response: {e}", task_id)
@@ -1402,7 +1554,7 @@ def index():
 @app.route('/generate-outline', methods=['POST'])
 def generate_outline_api():
     data = request.json
-    generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker)
+    generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker, API_CONFIG["provider"])
     structure = {"chapters": int(data.get('chapters', 10)), "sections": int(data.get('sections', 4))}
     outline = generator.generate_outline(data['topic'], data['outline_type'], structure)
     if outline and "API_" not in outline:
@@ -1423,7 +1575,7 @@ def start_task_api():
     topic = title_match.group(1).strip() if title_match else Task.sanitize_filename(original_topic, max_length=50)
 
     if outline_type == 'novel':
-        generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker)
+        generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker, API_CONFIG["provider"])
         log_message(f"Creating Worldview for {topic}...")
         initial_worldview = generator.generate_initial_worldview(topic, outline)
         if "API_" in initial_worldview:
@@ -1560,12 +1712,20 @@ if __name__ == '__main__':
         if not os.path.exists(dir_path): os.makedirs(dir_path)
     
     token_tracker = TokenTracker(TOKEN_STATS_FILE)
-    generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker)
+    generator = ContentGenerator(TARGET_API_URL, API_HEADERS, SERVED_MODEL_IDENTIFIER, token_tracker, API_CONFIG["provider"])
     task_manager = TaskManager(generator)
     task_manager.start()
     
+    # Check if .env file exists
+    if not os.path.exists('.env'):
+        print("\nNOTE: No .env file found. Using default configuration.")
+        print("      Copy .env.example to .env and configure your API settings.\n")
+    
     print("="*50)
     print("AI Content Factory v7.0 (Web UI) Started!")
+    print(f"LLM Provider: {LLM_PROVIDER.upper()}")
+    print(f"Model: {SERVED_MODEL_IDENTIFIER}")
+    print(f"API URL: {TARGET_API_URL}")
     print(f"Please open your browser to http://127.0.0.1:5000")
     print("="*50)
     app.run(host='0.0.0.0', port=5000, debug=False)
